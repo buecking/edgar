@@ -1,7 +1,8 @@
 module Edgar.Common
   (
   -- * Types
-    EdgarForm(..)
+    TickerCikLookup(..)
+  , EdgarForm(..)
   , YearQtr
   , yearQtr
   , year
@@ -13,6 +14,7 @@ module Edgar.Common
   , Connection
 
   , encodeEdgarForm
+  , encodeTickerCikLookup
 
   -- * Optparse Applicative
   , textOption
@@ -47,6 +49,23 @@ connectTo b = acquire b >>= \case
     Left e  → error "Unable to connect to database"
     Right c → return c
 
+data TickerCikLookup = TickerCikLookup
+  { tickerTicker ∷ !Text  -- one CIK may link to many tickers
+  , tickerCik    ∷ !Int64 -- i.e. 2020  GSX -> GOTU
+                          --      2018 PTIE -> SAVA
+                          -- Historical changes does not
+                          -- exist in SEC's raw data, but the
+                          -- information can be found in
+                          -- EFFECT forms
+  } deriving (Generic, Show)
+
+instance FromRecord TickerCikLookup
+instance ToRecord   TickerCikLookup
+
+encodeTickerCikLookup :: E.Params TickerCikLookup
+encodeTickerCikLookup
+    = contramap tickerTicker (E.param $ E.nonNullable E.text)
+   <> contramap tickerCik (E.param $ E.nonNullable E.int8)
 
 data EdgarForm = EdgarForm
   { cik         ∷ !Int64
@@ -74,7 +93,6 @@ encodeEdgarForm
 
 textOption ∷ Opt.Mod Opt.OptionFields String → Opt.Parser Text
 textOption ms = toText <$> Opt.strOption ms
-
 
 data YearQtr = YearQtr
   { year ∷ !Int

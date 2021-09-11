@@ -15,6 +15,7 @@ import           Network.HTTP.Simple
 
 import           Edgar.Common
 import           Edgar.Concurrent
+import qualified Data.ByteString.Char8 as C8
 
 
 download ∷ Config → IO ()
@@ -33,11 +34,11 @@ download c@Config{..} = do
     let nToDownload = length forms'
 
     putStrLn $ "Not downloaded: " <> show nToDownload
-    runConcurrent concurrentDLs (downloadAndSaveForm conn dir) forms'
+    runConcurrent concurrentDLs (downloadAndSaveForm c conn dir) forms'
 
-downloadAndSaveForm ∷ Connection → FilePath → Text → IO ()
-downloadAndSaveForm conn basedir ffn = do
-    source <- downloadUrl $ "https://www.sec.gov/Archives/" <> ffn
+downloadAndSaveForm ∷ Config -> Connection → FilePath → Text → IO ()
+downloadAndSaveForm c conn basedir ffn = do
+    source <- downloadUrl c $ "https://www.sec.gov/Archives/" <> ffn
     createDirectoryIfMissing True $ dropFileName localPath
     writeFileLBS localPath source
   where
@@ -49,9 +50,11 @@ notDownloaded basedir ffn = not <$> doesFileExist (basedir </> toString ffn)
 --------------------------------------------------------------------------------
 -- Database functions                                                         --
 --------------------------------------------------------------------------------
-downloadUrl ∷ (MonadIO m, MonadThrow m) => Text → m LByteString
-downloadUrl url =
-    getResponseBody <$> (httpLBS =<< parseRequest (toString url))
+downloadUrl ∷ (MonadIO m, MonadThrow m) => Config -> Text → m LByteString
+downloadUrl Config{..} url = do
+    url' <- addRequestHeader "User-Agent" (C8.pack userAgent)
+        <$> parseRequest (toString url)
+    getResponseBody <$> (httpLBS url')
 
 formFilename ∷ Connection → Int64 → IO Text
 formFilename conn i = run (statement i formFilenameQ) conn >>= \case
@@ -79,16 +82,21 @@ getQueryQueue conn cd@Conditions{..} =
                  <> (unwords . intersperse "and" . catMaybes $ conditions)
                  <> " order by random()"
 
-    conditions = [cikCond, conameCond, typeCond, startCond, endCond]
+    conditions = [cikCond, conameCond, typeCond, startCond, endCond, tickerCond]
 
     cikCond    = ("cik " <> )          <$> inConditionInt cik
     conameCond = ("company_name " <> ) <$> inConditionText companyName
     typeCond   = ("form_type " <> )    <$> inConditionText formType
     startCond  = (<>) "date_filed >= " . apostrophize True . toText . formatTime defaultTimeLocale "%F" <$> startDate
     endCond    = (<>) "date_filed <= " . apostrophize True . toText . formatTime defaultTimeLocale "%F" <$> endDate
+    tickerCond = innerSELECT "cik in ( SELECT cik FROM ticker WHERE " (("symbol " <> ) <$> inConditionText ticker)
 
     encoder = E.noParams
     decoder = D.rowList (D.column $ D.nonNullable D.text)
+
+innerSELECT :: Text -> Maybe Text -> Maybe Text
+innerSELECT _ Nothing = Nothing
+innerSELECT pref (Just x) = Just (pref <> x <> ")")
 
 
 inConditionInt ∷ [Int64] → Maybe Text
@@ -114,6 +122,7 @@ apostrophize False x = x
 data Config = Config
   { mode          ∷ !Mode
   , psql          ∷ !String
+  , userAgent     ∷ !String
   , dir           ∷ !FilePath
   , concurrentDLs ∷ !Int
   }
@@ -124,6 +133,7 @@ data Mode
 
 data Conditions = Conditions
   { cik         ∷ ![Int64]
+  , ticker      ∷ ![Text]
   , companyName ∷ ![Text]
   , formType    ∷ ![Text]
   , startDate   ∷ !(Maybe Day)

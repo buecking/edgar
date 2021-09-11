@@ -22,6 +22,15 @@ Edgar builds a local Postgres database of forms on Edgar and then allows you to 
 3. On the command line type `edgar init`. You will need to specify a path if
    you did not use the default database name (i.e. *edgar*). See getting help below.
 
+## Creating and updating your ticker lookup table
+
+The ticker lookup table is useful if you want to query a company by its
+ticker symbol. NOTE: Only actively traded companies will have a valid
+ticker. If a company is delisted or its trading symbol is renamed this
+method will produce unexpected results. See `edgar update --help` for
+details on updating ticker data.
+
+
 ## Creating and updating your form index
 
 The form index is housed in Postgres. *edgar* will keep your index up to date.

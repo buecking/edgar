@@ -1,5 +1,6 @@
 module Edgar.Update
   ( updateDbWithIndex
+  , updateTickerIndex
   , Config(..)
   )
   where
@@ -12,6 +13,7 @@ import qualified Data.Conduit.Binary          as C
 import qualified Data.Conduit.Zlib            as C
 import           Data.Csv                     hiding (header)
 import qualified Data.Vector                  as Partial
+import qualified Data.ByteString.Char8 as C8
 import qualified Hasql.Decoders               as D
 import qualified Hasql.Encoders               as E
 import           Hasql.Session
@@ -51,23 +53,56 @@ updateDbWithIndex c@Config{..} =  do
     conn <- connectTo $ encodeUtf8 psql
     Edgar.Common.mapM_ (updateDbYearQtr c conn) [startYq..fromMaybe startYq endYq]
 
+ppFormCounter :: FormCounter -> String
+ppFormCounter FormCounter{..} =
+    show _inserted <> " new forms inserted into DB" <>
+      if _duplicate > 0
+      then " (" <> show _duplicate <> " known forms found)"
+      else ""
 
+updateTickerIndex :: Config -> IO ()
+updateTickerIndex c@Config{..} =  do
+    putStrLn $ "Updating ticker/cik lookup table.."
+    conn <- connectTo $ encodeUtf8 psql
+    (_, tc) <- runResourceT $ runStateT (C.runConduit (updateTickerCikLookup c conn)) nullFormCounter
+    putStrLn $ "  " <>  ppFormCounter tc
 
 updateDbYearQtr ∷ Config → Connection → YearQtr → IO ()
 updateDbYearQtr c conn yq = do
     putStrLn $ "Updating " <> show (year yq) <> " quarter " <> show (qtr yq) <> ".."
-    (_, fc) <- runResourceT $  runStateT (C.runConduit (myConduit c conn yq)) nullFormCounter
-    putStr "  "
-    putStrLn $ finalMsg fc
-  where
-    finalMsg FormCounter{..} =
-        show _inserted <> " new forms inserted into DB" <>
-          if _duplicate > 0
-          then " (" <> show _duplicate <> " known forms found)"
-          else ""
+    (_, fc) <- runResourceT $ runStateT (C.runConduit (updateFormIndex c conn yq)) nullFormCounter
+    putStrLn $ "  " <> ppFormCounter fc
 
-myConduit ∷ Config → Connection → YearQtr → C.ConduitM a c UpdateM ()
-myConduit c@Config{..} conn yq
+updateTickerCikLookup ∷ Config → Connection → C.ConduitM a c UpdateM ()
+updateTickerCikLookup c@Config{..} conn
+    =  ticketSourceC c
+    .| C.lines
+    .| lazifyBSC
+    .| parseTickerCikLookupText
+    .| (C.awaitForever $ \ef ->  dbInsertTickerCikLookups conn ef)
+
+ticketSourceC ∷ Config → ConduitT i ByteString UpdateM ()
+ticketSourceC Config{..}  =
+    httpSource url getResponseBody
+  where
+    url = do
+        let initReq = parseRequest_ $ "https://www.sec.gov/include/ticker.txt"
+        addRequestHeader "User-Agent" (C8.pack userAgent) initReq
+
+parseTickerCikLookupText ∷ (MonadIO m, MonadState FormCounter m) => ConduitT LByteString TickerCikLookup m ()
+parseTickerCikLookupText = C.awaitForever yieldForm where
+    decoder b = Partial.head <$> decodeWith tabDelimited NoHeader b
+    yieldForm bs = case decoder bs of
+         Right ef → C.yield ef
+         Left _   → do
+             malformed += 1
+             liftIO (BSL.putStrLn $ "Error reading form: " <> bs)
+
+
+-- Form Index Update
+
+updateFormIndex ∷ Config → Connection → YearQtr → C.ConduitM a c UpdateM ()
+updateFormIndex c@Config{..} conn yq
     =  indexSourceC c yq
     .| C.ungzip
     .| C.lines
@@ -80,7 +115,11 @@ indexSourceC ∷ Config → YearQtr → ConduitT i ByteString UpdateM ()
 indexSourceC Config{..} yq =
     httpSource url getResponseBody
   where
-    url = parseRequest_ $ "https://www.sec.gov/Archives/edgar/full-index/" <> show (year yq) <> "/QTR" <> show (qtr yq) <> "/master.gz"
+    url = do
+        let initReq = parseRequest_ $
+                "https://www.sec.gov/Archives/edgar/full-index/" <> show (year yq) <> "/QTR" <> show (qtr yq) <> "/master.gz"
+        addRequestHeader "User-Agent" (C8.pack userAgent) initReq
+
 
 dropHeaderC ∷ ConduitT ByteString ByteString UpdateM ()
 dropHeaderC = ignoreC 11
@@ -116,9 +155,24 @@ pipeDelimited ∷ DecodeOptions
 pipeDelimited =
     defaultDecodeOptions{ decDelimiter = fromIntegral (ord '|')}
 
+tabDelimited ∷ DecodeOptions
+tabDelimited =
+    defaultDecodeOptions{ decDelimiter = fromIntegral (ord '\t')}
+
 --------------------------------------------------------------------------------
 -- Database functions                                                         --
 --------------------------------------------------------------------------------
+dbInsertTickerCikLookups
+    ∷ (MonadIO m, MonadState FormCounter m)
+    => Connection → TickerCikLookup → m ()
+dbInsertTickerCikLookups c ef = liftIO (run (statement ef stmt) c) >>= \case
+  Right _ → inserted += 1
+  Left e → if | isDuplicateError e → duplicate += 1
+              | otherwise          → error $ show e
+  where
+    stmt = Statement sql encodeTickerCikLookup D.noResult True
+    sql = "insert into ticker (symbol, cik) values ($1, $2)"
+
 insertEdgarForm ∷ (MonadIO m, MonadState FormCounter m)
                  => Connection → EdgarForm → m ()
 insertEdgarForm c ef = liftIO (run (statement ef insertQ) c) >>= \case
@@ -165,6 +219,7 @@ data Config = Config
   { startYq ∷ !YearQtr
   , endYq   ∷ !(Maybe YearQtr)
   , psql    ∷ !String
+  , userAgent ∷ !String
   }
 
 

@@ -15,19 +15,23 @@ import           Edgar.Common
 initDb ∷ Config → IO ()
 initDb Config{..} = do
   c <- connectTo $ encodeUtf8 psql
+  run (statement () tickerCikLookupQ) c >>= \case
+    Left e  → error $ show e
+    Right _ → putStrLn "TickerCikLookup table created."
+
   run (statement () formTypeQ) c >>= \case
     Left e  → error $ show e
     Right _ → putStrLn "Enumerated form type created."
 
-  run (statement () initQ) c >>= \case
+  run (statement () formsQ) c >>= \case
     Left e  → error $ show e
     Right _ → putStrLn "Forms table created."
 
 --------------------------------------------------------------------------------
 -- Database queries                                                           --
 --------------------------------------------------------------------------------
-initQ ∷ Statement () ()
-initQ = Statement sql encoder decoder True
+formsQ ∷ Statement () ()
+formsQ = Statement sql encoder decoder True
   where
     sql     = "create table forms (" <>
               "  id             serial primary key," <>
@@ -45,6 +49,16 @@ formTypeQ ∷ Statement () ()
 formTypeQ = Statement sql encoder decoder True
   where
     sql     = "create type form_type as enum ()"
+    encoder = E.noParams
+    decoder = D.noResult
+
+tickerCikLookupQ ∷ Statement () ()
+tickerCikLookupQ = Statement sql encoder decoder True
+  where
+    sql     = "create table ticker (" <>
+              "  symbol text," <>
+              "  cik    integer" <>
+              "  )"
     encoder = E.noParams
     decoder = D.noResult
 
